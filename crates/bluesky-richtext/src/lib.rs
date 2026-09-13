@@ -1,6 +1,7 @@
 //! Byte-accurate construction of Bluesky rich text facets.
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 /// A UTF-8 byte range within a post's text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -54,6 +55,101 @@ pub struct RichText {
     pub facets: Vec<Facet>,
 }
 
+/// Structural error in rich text received from an external source.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum RichTextError {
+    /// A facet begins after it ends.
+    #[error("facet {facet} starts at byte {start}, after its end at byte {end}")]
+    ReversedRange {
+        /// Zero-based facet position.
+        facet: usize,
+        /// Invalid start offset.
+        start: usize,
+        /// End offset.
+        end: usize,
+    },
+    /// A facet points beyond the text.
+    #[error("facet {facet} ends at byte {end}, beyond text length {text_len}")]
+    OutOfBounds {
+        /// Zero-based facet position.
+        facet: usize,
+        /// Invalid end offset.
+        end: usize,
+        /// Encoded text length.
+        text_len: usize,
+    },
+    /// A facet boundary splits a UTF-8 code point.
+    #[error("facet {facet} boundary at byte {offset} is not a UTF-8 character boundary")]
+    InvalidUtf8Boundary {
+        /// Zero-based facet position.
+        facet: usize,
+        /// Invalid boundary offset.
+        offset: usize,
+    },
+    /// A facet has no feature.
+    #[error("facet {facet} has no features")]
+    EmptyFeatures {
+        /// Zero-based facet position.
+        facet: usize,
+    },
+}
+
+impl RichText {
+    /// Validates every facet against this text's UTF-8 representation.
+    ///
+    /// # Errors
+    /// Returns the first invalid facet range or empty feature list.
+    pub fn validate(&self) -> Result<(), RichTextError> {
+        for (facet_number, facet) in self.facets.iter().enumerate() {
+            let ByteSlice {
+                byte_start,
+                byte_end,
+            } = facet.index;
+            if byte_start > byte_end {
+                return Err(RichTextError::ReversedRange {
+                    facet: facet_number,
+                    start: byte_start,
+                    end: byte_end,
+                });
+            }
+            if byte_end > self.text.len() {
+                return Err(RichTextError::OutOfBounds {
+                    facet: facet_number,
+                    end: byte_end,
+                    text_len: self.text.len(),
+                });
+            }
+            for offset in [byte_start, byte_end] {
+                if !self.text.is_char_boundary(offset) {
+                    return Err(RichTextError::InvalidUtf8Boundary {
+                        facet: facet_number,
+                        offset,
+                    });
+                }
+            }
+            if facet.features.is_empty() {
+                return Err(RichTextError::EmptyFeatures {
+                    facet: facet_number,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns the text covered by a facet after validating its byte range.
+    ///
+    /// # Errors
+    /// Returns an error if any facet in this value is structurally invalid or
+    /// if `facet` is out of bounds.
+    pub fn facet_text(&self, facet: usize) -> Result<Option<&str>, RichTextError> {
+        self.validate()?;
+        Ok(self
+            .facets
+            .get(facet)
+            .map(|facet| &self.text[facet.index.byte_start..facet.index.byte_end]))
+    }
+}
+
 /// Incrementally constructs rich text while maintaining UTF-8 byte offsets.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RichTextBuilder {
@@ -81,13 +177,17 @@ impl RichTextBuilder {
     }
 
     /// Appends undecorated text.
-    pub fn text_mut(&mut self, text: impl AsRef<str>) -> &mut Self {
+    pub fn add_text(&mut self, text: impl AsRef<str>) -> &mut Self {
         self.text.push_str(text.as_ref());
         self
     }
 
     /// Appends text decorated with one feature.
-    pub fn decorated(&mut self, text: impl AsRef<str>, feature: FacetFeature) -> &mut Self {
+    pub fn add_decorated_text(
+        &mut self,
+        text: impl AsRef<str>,
+        feature: FacetFeature,
+    ) -> &mut Self {
         let text = text.as_ref();
         let byte_start = self.text.len();
         self.text.push_str(text);
@@ -102,19 +202,19 @@ impl RichTextBuilder {
     }
 
     /// Appends linked text.
-    pub fn link(&mut self, text: impl AsRef<str>, uri: impl Into<String>) -> &mut Self {
-        self.decorated(text, FacetFeature::Link { uri: uri.into() })
+    pub fn add_link(&mut self, text: impl AsRef<str>, uri: impl Into<String>) -> &mut Self {
+        self.add_decorated_text(text, FacetFeature::Link { uri: uri.into() })
     }
 
     /// Appends a mention.
-    pub fn mention(&mut self, text: impl AsRef<str>, did: impl Into<String>) -> &mut Self {
-        self.decorated(text, FacetFeature::Mention { did: did.into() })
+    pub fn add_mention(&mut self, text: impl AsRef<str>, did: impl Into<String>) -> &mut Self {
+        self.add_decorated_text(text, FacetFeature::Mention { did: did.into() })
     }
 
     /// Appends a hashtag, adding the leading `#` to the text.
-    pub fn tag(&mut self, tag: impl Into<String>) -> &mut Self {
+    pub fn add_tag(&mut self, tag: impl Into<String>) -> &mut Self {
         let tag = tag.into();
-        self.decorated(format!("#{tag}"), FacetFeature::Tag { tag })
+        self.add_decorated_text(format!("#{tag}"), FacetFeature::Tag { tag })
     }
 
     /// Returns an owned snapshot without consuming this builder.
@@ -144,12 +244,12 @@ mod tests {
     fn builds_all_supported_features() {
         let mut builder = RichTextBuilder::new();
         builder
-            .text_mut("Hello ")
-            .mention("@luna", "did:plc:luna")
-            .text_mut(" — read ")
-            .link("this", "https://example.com")
-            .text_mut(" ")
-            .tag("rust");
+            .add_text("Hello ")
+            .add_mention("@luna", "did:plc:luna")
+            .add_text(" — read ")
+            .add_link("this", "https://example.com")
+            .add_text(" ")
+            .add_tag("rust");
 
         let rich_text = builder.finish();
         assert_eq!(rich_text.text, "Hello @luna — read this #rust");
@@ -180,8 +280,8 @@ mod tests {
     fn indexes_utf8_bytes_instead_of_characters() {
         let mut builder = RichTextBuilder::new();
         builder
-            .text_mut("🦀 café ")
-            .link("世界", "https://example.com");
+            .add_text("🦀 café ")
+            .add_link("世界", "https://example.com");
         let facet = &builder.facets()[0];
         assert_eq!(
             facet.index,
@@ -199,10 +299,10 @@ mod tests {
     #[test]
     fn build_is_a_snapshot_and_clone_is_independent() {
         let mut original = RichTextBuilder::new();
-        original.text_mut("one");
+        original.add_text("one");
         let snapshot = original.build();
         let mut cloned = original.clone();
-        cloned.text_mut(" two");
+        cloned.add_text(" two");
         assert_eq!(snapshot.text, "one");
         assert_eq!(original.text(), "one");
         assert_eq!(cloned.text(), "one two");
@@ -211,7 +311,7 @@ mod tests {
     #[test]
     fn serializes_to_bluesky_lexicon_shape() {
         let mut builder = RichTextBuilder::new();
-        builder.tag("rust");
+        builder.add_tag("rust");
         assert_eq!(
             serde_json::to_value(builder.finish()).unwrap(),
             serde_json::json!({
@@ -230,7 +330,7 @@ mod tests {
     #[test]
     fn empty_decorated_text_matches_reference_builder_behavior() {
         let mut builder = RichTextBuilder::new();
-        builder.link("", "https://example.com");
+        builder.add_link("", "https://example.com");
         assert_eq!(
             builder.facets()[0].index,
             ByteSlice {
@@ -238,5 +338,68 @@ mod tests {
                 byte_end: 0
             }
         );
+    }
+
+    #[test]
+    fn validates_and_slices_unicode_facets() {
+        let mut builder = RichTextBuilder::new();
+        builder.add_text("🦀 ").add_tag("rust");
+        let value = builder.finish();
+        assert_eq!(value.validate(), Ok(()));
+        assert_eq!(value.facet_text(0), Ok(Some("#rust")));
+        assert_eq!(value.facet_text(1), Ok(None));
+    }
+
+    #[test]
+    fn rejects_each_invalid_external_facet_shape() {
+        let feature = FacetFeature::Tag { tag: "x".into() };
+        let value = |index, features| RichText {
+            text: "🦀x".into(),
+            facets: vec![Facet { index, features }],
+        };
+        assert!(matches!(
+            value(
+                ByteSlice {
+                    byte_start: 5,
+                    byte_end: 4
+                },
+                vec![feature.clone()]
+            )
+            .validate(),
+            Err(RichTextError::ReversedRange { .. })
+        ));
+        assert!(matches!(
+            value(
+                ByteSlice {
+                    byte_start: 0,
+                    byte_end: 6
+                },
+                vec![feature.clone()]
+            )
+            .validate(),
+            Err(RichTextError::OutOfBounds { .. })
+        ));
+        assert!(matches!(
+            value(
+                ByteSlice {
+                    byte_start: 1,
+                    byte_end: 4
+                },
+                vec![feature.clone()]
+            )
+            .validate(),
+            Err(RichTextError::InvalidUtf8Boundary { .. })
+        ));
+        assert!(matches!(
+            value(
+                ByteSlice {
+                    byte_start: 0,
+                    byte_end: 4
+                },
+                vec![]
+            )
+            .validate(),
+            Err(RichTextError::EmptyFeatures { .. })
+        ));
     }
 }
