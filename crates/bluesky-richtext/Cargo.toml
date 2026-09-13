@@ -1,0 +1,21 @@
+[package]
+name = "bluesky-richtext"
+description = "Byte-accurate rich text facets for Bluesky"
+keywords = ["atproto", "bluesky", "rich-text"]
+categories = ["text-processing"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
+

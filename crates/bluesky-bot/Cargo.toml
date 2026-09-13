@@ -1,0 +1,16 @@
+[package]
+name = "bluesky-bot"
+description = "High-level framework for building Bluesky bots"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+bluesky-richtext = { path = "../bluesky-richtext", version = "0.1.0" }
+
+[lints]
+workspace = true
+
