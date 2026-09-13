@@ -9,8 +9,19 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 bluesky-richtext = { path = "../bluesky-richtext", version = "0.1.0" }
+bluesky-jetstream = { path = "../bluesky-jetstream", version = "0.1.0" }
+chrono.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+unicode-segmentation.workspace = true
+url.workspace = true
 
 [lints]
 workspace = true
-
